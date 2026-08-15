@@ -216,6 +216,13 @@ func NewServer(conf *ServerConfiguration, reqHandler RequestHandler) (
 		}
 
 		ms.transportType	= modbusTCPOverTLS
+	case "rtuovertcp":
+
+		if ms.conf.Timeout == 0 {
+			ms.conf.Timeout = 1 * time.Second
+		}
+
+		ms.transportType    = modbusRTUOverTCP
 
 	default:
 		err	= ErrConfigurationError
@@ -235,7 +242,7 @@ func (ms *ModbusServer) Start() (err error) {
 	}
 
 	switch ms.transportType {
-	case modbusTCP, modbusTCPOverTLS:
+	case modbusTCP, modbusTCPOverTLS, modbusRTUOverTCP:
 		// bind to a TCP socket
 		ms.tcpListener, err	= net.Listen("tcp", ms.conf.URL)
 		if err != nil {
@@ -353,6 +360,10 @@ func (ms *ModbusServer) handleTCPClient(sock net.Conn) {
 				newTCPTransport(tlsSock, ms.conf.Timeout, ms.conf.Logger),
 				sock.RemoteAddr().String(), clientRole)
 		}
+	case modbusRTUOverTCP:
+		ms.handleTransport(
+			newRTUTransport(sock, "", 9600, ms.conf.Timeout, ms.conf.Logger),
+			sock.RemoteAddr().String(), "")
 
 	default:
 		ms.logger.Errorf("unimplemented transport type %v", ms.transportType)

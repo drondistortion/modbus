@@ -113,8 +113,16 @@ func (rt *rtuTransport) ExecuteRequest(req *pdu) (res *pdu, err error) {
 
 // Reads a request from the rtu link.
 func (rt *rtuTransport) ReadRequest() (req *pdu, err error) {
-	// reading requests from RTU links is currently unsupported
-	err	= fmt.Errorf("unimplemented")
+	// following ten lines were written by AI
+	err = rt.link.SetDeadline(time.Now().Add(rt.timeout))
+	if err != nil {
+		return
+	}
+
+	req, err = rt.readRTURequestFrame()
+	if err != nil {
+		return
+	}
 
 	return
 }
@@ -200,6 +208,72 @@ func (rt *rtuTransport) readRTUFrame() (res *pdu, err error) {
 	return
 }
 
+func (rt *rtuTransport) readRTURequestFrame() (res *pdu, err error) {
+	var rxbuf       []byte
+	var byteCount   int
+	var bytesNeeded int
+	var crc         crc
+
+	rxbuf = make([]byte, maxRTUFrameLength)
+
+	// read the serial ADU header: unit id (1 byte), function code (1 byte) and
+	// PDU length/exception code (1 byte)
+	byteCount, err	= io.ReadFull(rt.link, rxbuf[0:3])
+	if (byteCount > 0 || err == nil) && byteCount != 3 {
+		err = ErrShortFrame
+		return
+	}
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return
+	}
+
+	// figure out how many further bytes to read
+	bytesNeeded, err = expectedRequestLength(uint8(rxbuf[1]))
+	if err != nil {
+		return
+	}
+
+	bytesNeeded--
+
+	// we need to read 2 additional bytes of CRC after the payload
+	bytesNeeded	+= 2
+
+	// never read more than the max allowed frame length
+	if byteCount + bytesNeeded > maxRTUFrameLength {
+		err	= ErrProtocolError
+		return
+	}
+
+	byteCount, err	= io.ReadFull(rt.link, rxbuf[3:3 + bytesNeeded])
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return
+	}
+	if byteCount != bytesNeeded {
+		rt.logger.Warningf("expected %v bytes, received %v", bytesNeeded, byteCount)
+		err = ErrShortFrame
+		return
+	}
+
+	// compute the CRC on the entire frame, excluding the CRC
+	crc.init()
+	crc.add(rxbuf[0:3 + bytesNeeded - 2])
+
+	// compare CRC values
+	if !crc.isEqual(rxbuf[3 + bytesNeeded - 2], rxbuf[3 + bytesNeeded - 1]) {
+		err = ErrBadCRC
+		return
+	}
+
+	res	= &pdu{
+		unitId:	      rxbuf[0],
+		functionCode: rxbuf[1],
+		// pass the byte count + trailing data as payload, withtout the CRC
+		payload:      rxbuf[2:3 + bytesNeeded  - 2],
+	}
+
+	return
+}
+
 // Turns a PDU object into bytes.
 func (rt *rtuTransport) assembleRTUFrame(p *pdu) (adu []byte) {
 	var crc		crc
@@ -242,6 +316,24 @@ func expectedResponseLenth(responseCode uint8, responseLength uint8) (byteCount 
 	default: err = ErrProtocolError
 	}
 
+	return
+}
+
+func expectedRequestLength(functionCode uint8) (byteCount int, err error) {
+	switch functionCode {
+	case fcReadCoils, fcReadDiscreteInputs,
+	     fcReadHoldingRegisters, fcReadInputRegisters,
+	     fcWriteSingleRegister, fcWriteSingleCoil:
+		byteCount = 4 // addr (2) + quantity/value (2)
+	case fcWriteMultipleCoils, fcWriteMultipleRegisters:
+		// variable length: addr(2)+quantity(2)+bytecount(1)+data,
+		// requires reading the byte-count field first
+		err = fmt.Errorf("unimplemented")
+	case fcMaskWriteRegister:
+		byteCount = 6
+	default:
+		err = ErrProtocolError
+	}
 	return
 }
 
